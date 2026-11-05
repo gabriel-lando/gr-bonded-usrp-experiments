@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0
 #
 # Create the Python environment for the experiment scripts: a .venv with
 # --system-site-packages, so it sees the system GNU Radio, UHD, gr-ieee802-11,

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0
 #
 # Headless IEEE 802.11 WiFi TX/RX - no Qt GUI, driven by argparse.
 #

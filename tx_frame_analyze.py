@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0
 #
 # Offline per-frame diagnosis of a raw RX IQ capture (wifi_trx.py --iq-capture)
 # of 802.11a/g frames — built to debug the bonded (hard-split) TX path.

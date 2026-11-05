@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0
 #
 # Bonded WiFi TX — hard-split wideband transmission across two synchronized B210s.
 #

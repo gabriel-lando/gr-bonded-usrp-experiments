@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0
 #
 # Generate a synthetic 802.11a IQ test vector for the PHY throughput benchmark.
 #

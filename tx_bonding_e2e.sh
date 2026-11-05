@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0
 #
 # End-to-end TX bonding check: a plain single-radio RX (wifi_trx.py, no bonded
 # code) runs on Machine 2 over ssh while this machine transmits, either with

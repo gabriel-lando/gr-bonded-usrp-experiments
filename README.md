@@ -45,7 +45,3 @@ the `wifi_phy_hier` block generated from gr-ieee802-11 (docs/EXPERIMENTS.md §1)
 The scripts default to the lab's radio serials and to Machine 2 as the remote
 host (`rysen-s2c2-02`); every one of them takes the serials and hosts as
 options or environment variables.
-
-## License
-
-GPL-3.0.

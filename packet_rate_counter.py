@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0
 #
 # Wraps a wifi_bonded_rx.py / wifi_trx.py RX process via stdin pipe, counts
 # only packets matching an exact decode_mac -> parse_mac pair (filters out

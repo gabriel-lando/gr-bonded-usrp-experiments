@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0
 #
 # Offline throughput benchmark of the gr-ieee802-11 RX PHY used by
 # wifi_bonded_rx.py — no radios. Feeds a looped IQ file (gen_frames.py) as fast

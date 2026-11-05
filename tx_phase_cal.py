@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0
 #
 # Closed-loop inter-radio phase correction for the bonded TX, using the
 # receiver as the monitor (lab feedback path, like explicit-feedback

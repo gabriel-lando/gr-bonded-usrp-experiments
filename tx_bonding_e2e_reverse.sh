@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0
 #
 # Reverse-direction end-to-end check: the bonded TX runs on Machine 2 over ssh
 # and the bonded RX runs here on Machine 1. Prints frames sent vs frames
