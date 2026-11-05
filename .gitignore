@@ -1,0 +1,12 @@
+# Python environment (./setup_venv.sh)
+.venv/
+__pycache__/
+*.pyc
+
+# Run artifacts: experiment logs, IQ captures and recordings, test vectors
+e2e_logs/
+*.log
+*.fc32
+*.cfile
+*.pcap
+*.npy

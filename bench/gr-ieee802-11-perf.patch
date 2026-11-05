@@ -1,0 +1,158 @@
+From 07499b6189225a3d9911c6fe5cba7d445a9b4395 Mon Sep 17 00:00:00 2001
+From: Gabriel Lando <gabriellando@hotmail.com>
+Date: Tue, 20 Oct 2026 18:56:07 +0000
+Subject: [PATCH] Replace per-sample exp() with phasor recurrence in RX hot
+ paths
+
+sync_short and sync_long applied their frequency correction as
+in[n] * exp(j*f*n), one sin/cos per sample. sync_short also copies a
+fixed 540*80 samples after every detection, so at moderate frame density
+most of the stream goes through that path. frame_equalizer did 64
+exp() per OFDM symbol for the sampling-offset correction, 64 identical
+exp(-beta), and interned "wifi_start" with pmt::string_to_symbol (global
+lock) on every symbol.
+
+Advance a phasor by one complex multiply per sample, re-anchored to the
+exact exp() every 512 samples so float error cannot accumulate; hoist
+the constant exp(-beta) and the interned symbol.
+
+Offline throughput of the RX chain on a Ryzen 7 5700G, 802.11a BPSK 1/2
+frames at 30% duty: 30.9 -> 75.9 MS/s; at 70% duty: 29.1 -> 67.1 MS/s.
+Decoded frame counts are identical to the original, including at 6 dB
+SNR with a 100 kHz carrier offset.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/frame_equalizer_impl.cc | 23 ++++++++++++++++-------
+ lib/sync_long.cc            | 15 +++++++++++++--
+ lib/sync_short.cc           | 13 ++++++++++++-
+ 3 files changed, 41 insertions(+), 10 deletions(-)
+
+diff --git a/lib/frame_equalizer_impl.cc b/lib/frame_equalizer_impl.cc
+index 253489a..3a3bb26 100644
+--- a/lib/frame_equalizer_impl.cc
++++ b/lib/frame_equalizer_impl.cc
+@@ -132,9 +132,12 @@ int frame_equalizer_impl::general_work(int noutput_items,
+     dout << "FRAME EQUALIZER: input " << ninput_items[0] << "  output " << noutput_items
+          << std::endl;
+ 
++    // Interned once: string_to_symbol takes a global lock on every call.
++    static const pmt::pmt_t WIFI_START = pmt::string_to_symbol("wifi_start");
++
+     while ((i < ninput_items[0]) && (o < noutput_items)) {
+ 
+-        get_tags_in_window(tags, 0, i, i + 1, pmt::string_to_symbol("wifi_start"));
++        get_tags_in_window(tags, 0, i, i + 1, WIFI_START);
+ 
+         // new frame
+         if (tags.size()) {
+@@ -158,11 +161,16 @@ int frame_equalizer_impl::general_work(int noutput_items,
+ 
+         std::memcpy(current_symbol, in + i * 64, 64 * sizeof(gr_complex));
+ 
+-        // compensate sampling offset
+-        for (int i = 0; i < 64; i++) {
+-            current_symbol[i] *= exp(gr_complex(0,
+-                                                2 * M_PI * d_current_symbol * 80 *
+-                                                    (d_epsilon0 + d_er) * (i - 32) / 64));
++        // compensate sampling offset; the phase is linear in the subcarrier
++        // index, so advance a phasor instead of a sin/cos per subcarrier
++        {
++            const float a = 2 * M_PI * d_current_symbol * 80 * (d_epsilon0 + d_er) / 64;
++            const gr_complex step = exp(gr_complex(0, a));
++            gr_complex rot = exp(gr_complex(0, -32 * a));
++            for (int i = 0; i < 64; i++) {
++                current_symbol[i] *= rot;
++                rot *= step;
++            }
+         }
+ 
+         gr_complex p = equalizer::base::POLARITY[(d_current_symbol - 2) % 127];
+@@ -197,8 +205,9 @@ int frame_equalizer_impl::general_work(int noutput_items,
+         }
+ 
+         // compensate residual frequency offset
++        const gr_complex beta_rot = exp(gr_complex(0, -beta));
+         for (int i = 0; i < 64; i++) {
+-            current_symbol[i] *= exp(gr_complex(0, -beta));
++            current_symbol[i] *= beta_rot;
+         }
+ 
+         // update estimate of residual frequency offset
+diff --git a/lib/sync_long.cc b/lib/sync_long.cc
+index 544fcfd..c751598 100644
+--- a/lib/sync_long.cc
++++ b/lib/sync_long.cc
+@@ -123,7 +123,12 @@ public:
+ 
+             break;
+ 
+-        case COPY:
++        case COPY: {
++            // Same phasor recurrence as sync_short: one multiply per sample
++            // instead of a sin/cos, re-anchored every 512 samples.
++            gr_complex rot = exp(gr_complex(0, d_offset * d_freq_offset));
++            const gr_complex step = exp(gr_complex(0, d_freq_offset));
++
+             while (i < ninput && o < noutput) {
+ 
+                 int rel = d_offset - d_frame_start;
+@@ -137,15 +142,21 @@ public:
+                 }
+ 
+                 if (rel >= 0 && (rel < 128 || ((rel - 128) % 80) > 15)) {
+-                    out[o] = in_delayed[i] * exp(gr_complex(0, d_offset * d_freq_offset));
++                    out[o] = in_delayed[i] * rot;
+                     o++;
+                 }
+ 
+                 i++;
+                 d_offset++;
++                if ((d_offset & 511) == 0) {
++                    rot = exp(gr_complex(0, d_offset * d_freq_offset));
++                } else {
++                    rot *= step;
++                }
+             }
+ 
+             break;
++        }
+ 
+         case RESET: {
+             while (o < noutput) {
+diff --git a/lib/sync_short.cc b/lib/sync_short.cc
+index af0988b..927597a 100644
+--- a/lib/sync_short.cc
++++ b/lib/sync_short.cc
+@@ -95,6 +95,12 @@ public:
+ 
+         case COPY: {
+ 
++            // Frequency correction phasor, advanced by one multiply per sample
++            // instead of a sin/cos per sample; re-anchored to the exact value
++            // every 512 samples so float error cannot accumulate.
++            gr_complex rot = exp(gr_complex(0, -d_freq_offset * d_copied));
++            const gr_complex step = exp(gr_complex(0, -d_freq_offset));
++
+             int o = 0;
+             while (o < ninput && o < noutput && d_copied < MAX_SAMPLES) {
+                 if (in_cor[o] > d_threshold) {
+@@ -116,9 +122,14 @@ public:
+                     d_plateau = 0;
+                 }
+ 
+-                out[o] = in[o] * exp(gr_complex(0, -d_freq_offset * d_copied));
++                out[o] = in[o] * rot;
+                 o++;
+                 d_copied++;
++                if ((d_copied & 511) == 0) {
++                    rot = exp(gr_complex(0, -d_freq_offset * d_copied));
++                } else {
++                    rot *= step;
++                }
+             }
+ 
+             if (d_copied == MAX_SAMPLES) {
+-- 
+2.43.0
+
