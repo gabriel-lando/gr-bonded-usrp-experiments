@@ -12,7 +12,10 @@ file only covers the experiments.
    check it:
    `python3 -c "from gnuradio import bonded_usrp"`.
 2. **gr-ieee802-11 and gr-foo** (the 802.11 PHY/MAC used by every script),
-   built from source for GNU Radio 3.10 and installed.
+   built from source for GNU Radio 3.10 and installed. To decode above
+   60 MHz, also build gr-ieee802-11 with `bench/gr-ieee802-11-perf.patch`
+   into `~/deps/ieee-perf-install` (`bench/README.md`); the bonded receiver
+   then uses its fused front-end.
 3. **`wifi_phy_hier`**, the hierarchical PHY block that `wifi_bonded_tx.py`
    and `wifi_trx.py` import. It is generated from gr-ieee802-11 into
    `~/.grc_gnuradio/`:
@@ -79,9 +82,12 @@ Bonded transmitter on Machine 1:
 then needs the phase loop of section 7). `--per-radio-rate` and
 `--radio-offset` override the plan.
 
-Drive levels: keep `--tx-amplitude` at its default 0.4 and set the power with
-`--tx-gain` (0.8 here). At 0.6 the OFDM peaks clip the DACs and 64-QAM loses
-frames.
+Drive levels: keep `--tx-amplitude` at its default 0.3 and set the power with
+`--tx-gain`: 0.8 at 20 MHz, 0.9 from 40 MHz up. A wider channel spreads the
+same power over more subcarrier bandwidth, so 64-QAM at 80 MHz needs the
+extra gain (0.8 there: 92 % instead of 98 %); at 20 MHz, 0.9 saturates the
+receivers next to the transmitter. At 0.4 the rare OFDM peaks still clip the
+DACs, at 0.6 64-QAM loses many frames.
 
 ## 4. One-radio TX → bonded RX
 
@@ -116,16 +122,22 @@ transmitter.
 Machine 2, bonded RX:
 
 ```bash
-stdbuf -oL -eL ./wifi_bonded_rx.py --mode live --freq 2.484e9 --samp-rate 40e6 \
+source bench/use_perf_build.sh     # patched gr-ieee802-11, needed above 60 MHz
+stdbuf -oL -eL ./wifi_bonded_rx.py --mode live --freq 2.484e9 --samp-rate 80e6 \
     --serial-a 30B56D6 --serial-b 30DBC3D --rx-gain-db 35 2>&1 | ./packet_rate_counter.py
 ```
 
 Machine 1, bonded TX:
 
 ```bash
-./wifi_bonded_tx.py --freq 2.484e9 --samp-rate 40e6 \
-    --serial-a 30DBC3C --serial-b 30EDB63 --tx-gain 0.8 --encoding 7
+./wifi_bonded_tx.py --freq 2.484e9 --samp-rate 80e6 \
+    --serial-a 30DBC3C --serial-b 30EDB63 --tx-gain 0.9 --encoding 7
 ```
+
+The receiver's first line says which PHY front-end it uses
+(`phy_frontend=fused` with the patched build). At 80 MHz each radio runs at
+50 MS/s; 0.1–0.5 overflows per second are normal there and cost a few
+milliseconds each (the receiver steps over the gap).
 
 The roles can be swapped (TX on Machine 2, RX on Machine 1) by swapping the
 serials.
@@ -142,21 +154,37 @@ transmitter here, then prints `sent=… decoded=… underruns=…`:
 ```bash
 ./tx_bonding_e2e.sh bonded 30                                  # bonded TX -> 1-radio RX, 10 MHz
 RATE=20e6 TX_GAIN=0.8 RX_GAIN=0.6 ENC=7 ./tx_bonding_e2e.sh bonded 30
-RX_BONDED=1 RATE=40e6 TX_GAIN=0.8 RX_INIT=20 ENC=7 ./tx_bonding_e2e.sh bonded 30   # 2 + 2
+RX_BONDED=1 RATE=80e6 TX_GAIN=0.9 RX_INIT=20 ENC=7 ./tx_bonding_e2e.sh bonded 30   # 2 + 2
 ./tx_bonding_e2e.sh base 30                                    # single-radio TX baseline
-RATE=40e6 ENC=7 ./tx_bonding_e2e_reverse.sh 30                 # 2 + 2, TX on Machine 2
+RATE=80e6 TX_GAIN=0.9 ENC=7 ./tx_bonding_e2e_reverse.sh 30     # 2 + 2, TX on Machine 2
 ```
 
 Other variables (see the script headers): `ENC`, `INTERVAL`, `FREQ`,
 `RX_SERIAL(_B)`, `RX_GAIN_DB` (default 35), `RX_ENV` (environment for the
-receiver), `CAPTURE=1` (save the receiver's IQ on Machine 2), `TAG`. Extra
-`wifi_bonded_tx.py` arguments go after `--` (for example `-- --split filter`).
-Logs go to `e2e_logs/`.
+receiver), `RX_ARGS` (extra receiver arguments), `RX_PERF=0` (receiver with
+the system gr-ieee802-11 only), `CAPTURE=1` (save the receiver's IQ on
+Machine 2), `TAG`. Extra `wifi_bonded_tx.py` arguments go after `--` (for
+example `-- --split filter`). Logs go to `e2e_logs/`.
 
-### Reference results (30 s runs of ~80 frames; branch gl/64qam, 2026-11-05)
+### Reference results, 2 + 2 up to 80 MHz (branch gl/80mhz, 2026-11-05)
+
+64-QAM 3/4, `--tx-amplitude 0.3`, TX gain 0.8 at 20 MHz and 0.9 above,
+bonded RX at 35 dB with the patched PHY; 30 s runs of ~78 frames unless
+noted.
+
+| direction | 20 MHz | 40 MHz | 60 MHz | 80 MHz |
+|---|---|---|---|---|
+| M1 TX → M2 RX | 79/79 | 79/79 | 75/78, 76/78, 77/77 (one session 58/78) | 77/77; 176/178 over 60 s; 373/379 over 2 min; at 20 frames/s 450–466 of 456–473 in five sessions (one 321/472) |
+| M2 TX → M1 RX | 78/78 | 79/79 | 79/79, 77/78 | 79/79; 178/178 over 60 s; 378/379 over 2 min; at 20 frames/s 467/470, 454/455 |
+
+At 80 MHz, BPSK: 78/79 (474/475 at 20 frames/s), 77/77 reversed; 16-QAM:
+78/79, 80/80 reversed. With TX gain 0.8 at 80 MHz, 64-QAM drops to ~92 %.
+The history of the 80 MHz work is in `LAB_NOTES.md` §18.
+
+### Earlier reference results (branch gl/64qam, 2026-11-05)
 
 TX gain 0.8, `--tx-amplitude 0.4`, `--split ofdm`; bonded RX at 35 dB,
-one-radio RX at 0.6.
+one-radio RX at 0.6; stock PHY.
 
 | setup | MCS | 20 MHz | 40 MHz | 60 MHz |
 |---|---|---|---|---|
@@ -234,12 +262,18 @@ subcarrier, `--min-len 0.02e-3` at 60 MHz). It must also be copied to
   and `tx_frame_analyze.py --per-k`, a saturated radio shows as a whole half
   of the channel with worse EVM), then SNR (EVM per subcarrier near −20 dB
   is too little for 64-QAM 3/4).
-- **60 MHz bonded RX on Machine 2 decodes little, with `aligned fetch
-  degraded` every second:** the stock gr-ieee802-11 PHY cannot keep up with
-  60 MHz there when the channel is busy, and the bonded TX's LO leakage at TX
-  gain 0.9 makes it worse (0 decoded before the bonded_source fix, ~40 %
-  after). Keep the TX gain at 0.85 or below; `BONDED_RX_PROFILE=1` shows
-  `served` below the per-radio rate.
+- **Bonded RX overflows continuously (`recv` below the per-radio rate even
+  with `--no-decode`):** check that gr-bonded-usrp was built as Release
+  (`grep CMAKE_BUILD_TYPE build/CMakeCache.txt`); an unoptimized build was
+  the whole problem on Machine 2. A few overflows per second at 80 MHz are
+  normal.
+- **60–80 MHz bonded RX decodes little, `served` below the per-radio rate
+  in `BONDED_RX_PROFILE=1`:** the stock gr-ieee802-11 PHY cannot keep up;
+  load the patched build (`source bench/use_perf_build.sh`, see the
+  receiver's `phy_frontend=` line).
+- **A radio is not found (`No devices found for serial …`):** another
+  process still holds it, typically a transmitter or receiver left over from
+  an interrupted run (`pgrep -a python3` on both machines).
 - **`pthread_setschedparam` warnings** mean UHD could not raise thread priority
   without privileges. They are harmless at these rates.
 - History, measurements and the bugs found along the way: `LAB_NOTES.md`.

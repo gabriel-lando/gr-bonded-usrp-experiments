@@ -14,6 +14,9 @@
 #   RX_BONDED=1  receive with the bonded RX (wifi_bonded_rx.py, radios RX_SERIAL +
 #                RX_SERIAL_B [30DBC3D], gain RX_GAIN_DB [35]) instead of one radio
 #   RX_ENV="VAR=val ..."  environment for the RX process (e.g. BONDED_PROFILE=1)
+#   RX_ARGS="..."  extra arguments for the RX script (e.g. --phy-frontend fused)
+#   RX_PERF [1]  RX loads the patched gr-ieee802-11 from bench/use_perf_build.sh's
+#                prefix when it is there (0: the system one only)
 #   CAPTURE=1  also write the raw RX IQ to $RX_DIR/<tag>.fc32 on the RX host
 #   TAG [<mode>_enc<ENC>]  RX_DIR [/tmp/txb]  LOG_DIR [./e2e_logs]
 #   REMOTE_DIR [~/bonded-uhd/gr-bonded-usrp-experiments]  this repo on the RX host
@@ -52,7 +55,10 @@ else
     RX_CMD="./wifi_trx.py --mode rx --freq $FREQ --samp-rate $RATE \
   --rx-serial $RX_SERIAL --rx-gain $RX_GAIN $CAP"
 fi
-ssh "$RX_HOST" "mkdir -p $RX_DIR && cd $REMOTE_DIR && source .venv/bin/activate && \
+RX_CMD="$RX_CMD ${RX_ARGS:-}"
+PERF=""
+[ "${RX_PERF:-1}" = "1" ] && PERF="source bench/use_perf_build.sh && "
+ssh "$RX_HOST" "mkdir -p $RX_DIR && cd $REMOTE_DIR && source .venv/bin/activate && $PERF\
   ${RX_ENV:-} timeout -s INT $RX_SECS stdbuf -oL -eL $RX_CMD 2>&1 | \
   python3 -u -c 'import sys,time; [print(\"%.2f\" % time.time(), l, end=\"\") for l in sys.stdin]' \
   > $RX_DIR/$TAG.rx.log" &

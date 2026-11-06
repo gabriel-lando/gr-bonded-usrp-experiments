@@ -244,9 +244,11 @@ def main():
     p.add_argument('--chan-est', type=int, default=0, choices=range(4),
                    help='Channel estimator: ' +
                         ', '.join(f'{i}={n}' for i, n in enumerate(CHAN_EST_NAMES)))
-    p.add_argument('--phy-frontend', choices=('blocks', 'fused'), default='blocks',
+    p.add_argument('--phy-frontend', choices=('auto', 'blocks', 'fused'), default='auto',
                    help='Schmidl-Cox front-end: stock GR blocks, or one '
-                        'ieee802_11.sync_short_fused (patched gr-ieee802-11)')
+                        'ieee802_11.sync_short_fused (patched gr-ieee802-11, '
+                        'needed for decode above 60 MHz); auto = fused when '
+                        'the loaded gr-ieee802-11 has it')
     p.add_argument('--pcap', type=str, default=None,
                    help='Append decoded frames to this pcap file')
     p.add_argument('--iq-capture', type=str, default=None,
@@ -266,9 +268,12 @@ def main():
     p.add_argument('--max-noutput-items', type=int, default=8192,
                    help='GNU Radio scheduler max noutput_items')
     args = p.parse_args()
+    if args.phy_frontend == 'auto':
+        args.phy_frontend = 'fused' if hasattr(ieee802_11, 'sync_short_fused') else 'blocks'
 
     print(f"[bonded] WiFi bonded RX  fc={args.freq/1e6:.3f} MHz  "
-          f"combined={args.samp_rate/1e6:.0f} Msps  rx_gain={args.rx_gain_db:.1f} dB")
+          f"combined={args.samp_rate/1e6:.0f} Msps  rx_gain={args.rx_gain_db:.1f} dB  "
+          f"phy_frontend={args.phy_frontend}")
     print(f"[bonded] Requires external 10 MHz + PPS on both radios")
 
     tb = WifiBondedRx(args)

@@ -1,7 +1,7 @@
 From 07499b6189225a3d9911c6fe5cba7d445a9b4395 Mon Sep 17 00:00:00 2001
 From: Gabriel Lando <gabriellando@hotmail.com>
 Date: Tue, 20 Oct 2026 18:56:07 +0000
-Subject: [PATCH] Replace per-sample exp() with phasor recurrence in RX hot
+Subject: [PATCH 1/2] Replace per-sample exp() with phasor recurrence in RX hot
  paths
 
 sync_short and sync_long applied their frequency correction as
@@ -153,6 +153,597 @@ index af0988b..927597a 100644
              }
  
              if (d_copied == MAX_SAMPLES) {
+-- 
+2.43.0
+
+
+From 90ed62b9dabc96d90c9d01c80bb0bcfef8ff6e36 Mon Sep 17 00:00:00 2001
+From: Gabriel Lando <gabriellando@hotmail.com>
+Date: Thu, 5 Nov 2026 21:51:53 +0000
+Subject: [PATCH 2/2] Add sync_short_fused: Schmidl-Cox front-end folded into
+ sync_short
+
+The examples wire sync_short behind a six-block Schmidl-Cox front-end
+(delay, conjugate multiply, two moving averages, complex_to_mag, divide).
+On quiet channels that chain costs more than the rest of the receiver,
+mostly in scheduler handoffs between small blocks. sync_short_fused
+computes the same autocorrelation and power inside one block with
+sync_short's state machine. It takes the raw samples and produces the
+same output and tags as the chain plus sync_short, so it is a drop-in
+replacement; the original blocks are unchanged.
+
+Offline throughput of the RX chain on a Ryzen 7 5700G, 802.11a BPSK 1/2
+frames at 20 dB SNR (with the phasor patch):
+
+  duty   original   phasor   phasor + sync_short_fused
+   5 %   70.2       89.7     193.8 MS/s
+  30 %   30.5       76.4     108.0 MS/s
+
+Decoded frame counts are identical in all three.
+---
+ grc/CMakeLists.txt                            |   1 +
+ grc/ieee802_11_sync_short_fused.block.yml     |  44 +++
+ include/ieee802_11/CMakeLists.txt             |   1 +
+ include/ieee802_11/sync_short_fused.h         |  48 ++++
+ lib/CMakeLists.txt                            |   1 +
+ lib/sync_short_fused.cc                       | 268 ++++++++++++++++++
+ python/bindings/CMakeLists.txt                |   1 +
+ .../sync_short_fused_pydoc_template.h         |  27 ++
+ python/bindings/python_bindings.cc            |   2 +
+ python/bindings/sync_short_fused_python.cc    |  63 ++++
+ 10 files changed, 456 insertions(+)
+ create mode 100644 grc/ieee802_11_sync_short_fused.block.yml
+ create mode 100644 include/ieee802_11/sync_short_fused.h
+ create mode 100644 lib/sync_short_fused.cc
+ create mode 100644 python/bindings/docstrings/sync_short_fused_pydoc_template.h
+ create mode 100644 python/bindings/sync_short_fused_python.cc
+
+diff --git a/grc/CMakeLists.txt b/grc/CMakeLists.txt
+index 3e2b553..6232417 100644
+--- a/grc/CMakeLists.txt
++++ b/grc/CMakeLists.txt
+@@ -17,5 +17,6 @@ install(FILES
+     ieee802_11_parse_mac.block.yml
+     ieee802_11_sync_long.block.yml
+     ieee802_11_sync_short.block.yml
++    ieee802_11_sync_short_fused.block.yml
+     ieee802_11_append_crc32.block.yml DESTINATION share/gnuradio/grc/blocks
+ )
+diff --git a/grc/ieee802_11_sync_short_fused.block.yml b/grc/ieee802_11_sync_short_fused.block.yml
+new file mode 100644
+index 0000000..e1b5d67
+--- /dev/null
++++ b/grc/ieee802_11_sync_short_fused.block.yml
+@@ -0,0 +1,44 @@
++id: ieee802_11_sync_short_fused
++label: WiFi Sync Short (fused front-end)
++category: '[IEEE802.11]'
++
++parameters:
++-   id: log
++    label: Log
++    dtype: bool
++    default: 'False'
++    options: ['True', 'False']
++    option_labels: [Enable, Disable]
++-   id: debug
++    label: Debug
++    dtype: bool
++    default: 'False'
++    options: ['True', 'False']
++    option_labels: [Enable, Disable]
++-   id: threshold
++    label: Threshold
++    dtype: real
++    default: '0.56'
++-   id: min_plateau
++    label: Min Plateau
++    dtype: int
++    default: '2'
++
++inputs:
++-   domain: stream
++    dtype: complex
++    multiplicity: '1'
++
++outputs:
++-   domain: stream
++    dtype: complex
++    multiplicity: '1'
++asserts:
++- ${ threshold > 0 }
++- ${ min_plateau > 0 }
++
++templates:
++    imports: import ieee802_11
++    make: ieee802_11.sync_short_fused(${threshold}, ${min_plateau}, ${log}, ${debug})
++
++file_format: 1
+diff --git a/include/ieee802_11/CMakeLists.txt b/include/ieee802_11/CMakeLists.txt
+index b893474..e7fc589 100644
+--- a/include/ieee802_11/CMakeLists.txt
++++ b/include/ieee802_11/CMakeLists.txt
+@@ -23,5 +23,6 @@ install(FILES
+     signal_field.h
+     sync_long.h
+     sync_short.h
++    sync_short_fused.h
+     append_crc32.h DESTINATION include/ieee802_11
+ )
+diff --git a/include/ieee802_11/sync_short_fused.h b/include/ieee802_11/sync_short_fused.h
+new file mode 100644
+index 0000000..e655ab2
+--- /dev/null
++++ b/include/ieee802_11/sync_short_fused.h
+@@ -0,0 +1,48 @@
++/*
++ * Copyright (C) 2013, 2016 Bastian Bloessl <bloessl@ccs-labs.org>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++#ifndef INCLUDED_IEEE802_11_SYNC_SHORT_FUSED_H
++#define INCLUDED_IEEE802_11_SYNC_SHORT_FUSED_H
++
++#include <gnuradio/block.h>
++#include <ieee802_11/api.h>
++
++namespace gr {
++namespace ieee802_11 {
++
++/*!
++ * \brief sync_short with the Schmidl-Cox front-end built in.
++ *
++ * Takes the raw baseband stream and computes the lag-16 autocorrelation,
++ * its 48-sample moving sum, the 64-sample power and their ratio internally,
++ * replacing the delay / conjugate / multiply / moving_average / complex_to_mag
++ * / complex_to_mag_squared / divide chain that feeds sync_short. Output and
++ * tags are the same as sync_short's.
++ */
++class IEEE802_11_API sync_short_fused : virtual public block
++{
++public:
++    typedef std::shared_ptr<sync_short_fused> sptr;
++    static sptr make(double threshold,
++                     unsigned int min_plateau,
++                     bool log = false,
++                     bool debug = false);
++};
++
++} // namespace ieee802_11
++} // namespace gr
++
++#endif /* INCLUDED_IEEE802_11_SYNC_SHORT_FUSED_H */
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index 7edc7bc..f8b3871 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -38,6 +38,7 @@ list(APPEND ieee802_11_sources
+     signal_field_impl.cc
+     sync_long.cc
+     sync_short.cc
++    sync_short_fused.cc
+     utils.cc
+     viterbi_decoder/base.cc
+     append_crc32_impl.cc
+diff --git a/lib/sync_short_fused.cc b/lib/sync_short_fused.cc
+new file mode 100644
+index 0000000..9f15b54
+--- /dev/null
++++ b/lib/sync_short_fused.cc
+@@ -0,0 +1,268 @@
++/*
++ * Copyright (C) 2013, 2016 Bastian Bloessl <bloessl@ccs-labs.org>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++#include "utils.h"
++#include <gnuradio/io_signature.h>
++#include <ieee802_11/sync_short_fused.h>
++#include <volk/volk.h>
++
++#include <algorithm>
++#include <iostream>
++#include <vector>
++
++using namespace gr::ieee802_11;
++
++static const int MIN_GAP = 480;
++static const int MAX_SAMPLES = 540 * 80;
++
++// Schmidl-Cox front-end geometry, as wired in front of sync_short in the
++// examples: short training symbol period, autocorrelation window and power
++// window (autocorrelation window + lag).
++static const int LAG = 16;
++static const int COR_WIN = 48;
++static const int PWR_WIN = COR_WIN + LAG;
++static const int HIST = PWR_WIN - 1; // past samples needed for sample n
++
++class sync_short_fused_impl : public sync_short_fused
++{
++
++public:
++    sync_short_fused_impl(double threshold,
++                          unsigned int min_plateau,
++                          bool log,
++                          bool debug)
++        : block("sync_short_fused",
++                gr::io_signature::make(1, 1, sizeof(gr_complex)),
++                gr::io_signature::make(1, 1, sizeof(gr_complex))),
++          d_log(log),
++          d_debug(debug),
++          d_state(SEARCH),
++          d_plateau(0),
++          d_freq_offset(0),
++          d_copied(0),
++          MIN_PLATEAU(min_plateau),
++          d_threshold(threshold),
++          d_threshold2(threshold * threshold),
++          d_buf(HIST, gr_complex(0, 0))
++    {
++
++        set_tag_propagation_policy(block::TPP_DONT);
++    }
++
++    int general_work(int noutput_items,
++                     gr_vector_int& ninput_items,
++                     gr_vector_const_void_star& input_items,
++                     gr_vector_void_star& output_items)
++    {
++
++        const gr_complex* in = (const gr_complex*)input_items[0];
++        gr_complex* out = (gr_complex*)output_items[0];
++
++        int noutput = noutput_items;
++        int ninput = ninput_items[0];
++        if (ninput <= 0) {
++            return 0;
++        }
++
++        // Contiguous view with the HIST samples preceding this call in front,
++        // so x[n - k] is valid for every k <= HIST. The stream starts from
++        // zeros, as the delay and moving-average blocks it replaces did.
++        d_buf.resize(HIST);
++        d_buf.insert(d_buf.end(), in, in + ninput);
++        x = d_buf.data() + HIST;
++
++        // Per-sample terms for the whole call in two SIMD passes, so the
++        // sliding windows below are just an add and a subtract per sample.
++        // P[m] = x[m] conj(x[m - LAG]) for m >= -(COR_WIN - 1);
++        // W[m] = |x[m]|^2 for m >= -HIST.
++        d_prod.resize(COR_WIN - 1 + ninput);
++        d_pow.resize(HIST + ninput);
++        volk_32fc_x2_multiply_conjugate_32fc(d_prod.data(),
++                                             x - (COR_WIN - 1),
++                                             x - (COR_WIN - 1) - LAG,
++                                             d_prod.size());
++        volk_32fc_magnitude_squared_32f(d_pow.data(), x - HIST, d_pow.size());
++        P = d_prod.data() + (COR_WIN - 1);
++        W = d_pow.data() + HIST;
++        init_sums();
++
++        int consumed = 0;
++        int produced = 0;
++
++        switch (d_state) {
++
++        case SEARCH: {
++            int i;
++
++            for (i = 0; i < ninput; i++) {
++                if (i) {
++                    advance(i);
++                }
++                if (above_threshold()) {
++                    if (d_plateau < MIN_PLATEAU) {
++                        d_plateau++;
++
++                    } else {
++                        d_state = COPY;
++                        d_copied = 0;
++                        d_freq_offset = arg(acc()) / 16;
++                        d_plateau = 0;
++                        insert_tag(nitems_written(0), d_freq_offset, nitems_read(0) + i);
++                        dout << "SHORT Frame!" << std::endl;
++                        break;
++                    }
++                } else {
++                    d_plateau = 0;
++                }
++            }
++
++            consumed = i;
++            break;
++        }
++
++        case COPY: {
++
++            // Frequency correction phasor, advanced by one multiply per sample
++            // instead of a sin/cos per sample; re-anchored to the exact value
++            // every 512 samples so float error cannot accumulate.
++            gr_complex rot = exp(gr_complex(0, -d_freq_offset * d_copied));
++            const gr_complex step = exp(gr_complex(0, -d_freq_offset));
++
++            int o = 0;
++            while (o < ninput && o < noutput && d_copied < MAX_SAMPLES) {
++                if (o) {
++                    advance(o);
++                }
++                if (above_threshold()) {
++                    if (d_plateau < MIN_PLATEAU) {
++                        d_plateau++;
++
++                        // there's another frame
++                    } else if (d_copied > MIN_GAP) {
++                        d_copied = 0;
++                        d_plateau = 0;
++                        d_freq_offset = arg(acc()) / 16;
++                        insert_tag(
++                            nitems_written(0) + o, d_freq_offset, nitems_read(0) + o);
++                        dout << "SHORT Frame!" << std::endl;
++                        break;
++                    }
++
++                } else {
++                    d_plateau = 0;
++                }
++
++                out[o] = x[o - LAG] * rot;
++                o++;
++                d_copied++;
++                if ((d_copied & 511) == 0) {
++                    rot = exp(gr_complex(0, -d_freq_offset * d_copied));
++                } else {
++                    rot *= step;
++                }
++            }
++
++            if (d_copied == MAX_SAMPLES) {
++                d_state = SEARCH;
++            }
++
++            dout << "SHORT copied " << o << std::endl;
++
++            consumed = o;
++            produced = o;
++            break;
++        }
++
++        default:
++            throw std::runtime_error("sync short fused: unknown state");
++        }
++
++        // Keep the HIST samples preceding the first unconsumed one.
++        std::copy(d_buf.begin() + consumed,
++                  d_buf.begin() + consumed + HIST,
++                  d_buf.begin());
++        d_buf.resize(HIST);
++
++        consume_each(consumed);
++        return produced;
++    }
++
++    void insert_tag(uint64_t item, double freq_offset, uint64_t input_item)
++    {
++        mylog("frame start at in: {} out: {}", item, input_item);
++
++        const pmt::pmt_t key = pmt::string_to_symbol("wifi_start");
++        const pmt::pmt_t value = pmt::from_double(freq_offset);
++        const pmt::pmt_t srcid = pmt::string_to_symbol(name());
++        add_item_tag(0, item, key, value, srcid);
++    }
++
++private:
++    // Running sums for sample 0 of this call, built from the history. They are
++    // rebuilt every call, so rounding cannot accumulate across calls.
++    void init_sums()
++    {
++        d_acc = 0;
++        d_pwr = 0;
++        for (int k = 0; k < COR_WIN; k++) {
++            d_acc += std::complex<double>(P[-k]);
++        }
++        for (int k = 0; k < PWR_WIN; k++) {
++            d_pwr += W[-k];
++        }
++    }
++
++    // Slide both windows from sample n - 1 to sample n.
++    void advance(int n)
++    {
++        d_acc += std::complex<double>(P[n] - P[n - COR_WIN]);
++        d_pwr += W[n] - W[n - PWR_WIN];
++    }
++
++    gr_complex acc() const { return gr_complex(d_acc.real(), d_acc.imag()); }
++    // |acc| / pwr > threshold, without the sqrt and divide. Same decision:
++    // when pwr is 0 the window is all zeros and both forms are false.
++    bool above_threshold() const
++    {
++        return std::norm(d_acc) > d_threshold2 * d_pwr * d_pwr;
++    }
++
++    enum { SEARCH, COPY } d_state;
++    int d_copied;
++    int d_plateau;
++    float d_freq_offset;
++    const double d_threshold;
++    const double d_threshold2;
++    const bool d_log;
++    const bool d_debug;
++    const unsigned int MIN_PLATEAU;
++
++    std::vector<gr_complex> d_buf;
++    std::vector<gr_complex> d_prod;
++    std::vector<float> d_pow;
++    const gr_complex* x = nullptr;
++    const gr_complex* P = nullptr;
++    const float* W = nullptr;
++    std::complex<double> d_acc;
++    double d_pwr = 0;
++};
++
++sync_short_fused::sptr
++sync_short_fused::make(double threshold, unsigned int min_plateau, bool log, bool debug)
++{
++    return gnuradio::get_initial_sptr(
++        new sync_short_fused_impl(threshold, min_plateau, log, debug));
++}
+diff --git a/python/bindings/CMakeLists.txt b/python/bindings/CMakeLists.txt
+index 9d254e1..87ca5ba 100644
+--- a/python/bindings/CMakeLists.txt
++++ b/python/bindings/CMakeLists.txt
+@@ -41,6 +41,7 @@ list(APPEND ieee802_11_python_files
+     signal_field_python.cc
+     sync_long_python.cc
+     sync_short_python.cc
++    sync_short_fused_python.cc
+     append_crc32_python.cc python_bindings.cc)
+ 
+ GR_PYBIND_MAKE_OOT(ieee802_11 
+diff --git a/python/bindings/docstrings/sync_short_fused_pydoc_template.h b/python/bindings/docstrings/sync_short_fused_pydoc_template.h
+new file mode 100644
+index 0000000..41c05d0
+--- /dev/null
++++ b/python/bindings/docstrings/sync_short_fused_pydoc_template.h
+@@ -0,0 +1,27 @@
++/*
++ * Copyright 2021 Free Software Foundation, Inc.
++ *
++ * This file is part of GNU Radio
++ *
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ *
++ */
++#include "pydoc_macros.h"
++#define D(...) DOC(gr,ieee802_11, __VA_ARGS__ )
++/*
++  This file contains placeholders for docstrings for the Python bindings.
++  Do not edit! These were automatically extracted during the binding process
++  and will be overwritten during the build process
++ */
++
++
++ 
++ static const char *__doc_gr_ieee802_11_sync_short_fused = R"doc()doc";
++
++
++ static const char *__doc_gr_ieee802_11_sync_short_fused_sync_short_fused = R"doc()doc";
++
++
++ static const char *__doc_gr_ieee802_11_sync_short_fused_make = R"doc()doc";
++
++  
+diff --git a/python/bindings/python_bindings.cc b/python/bindings/python_bindings.cc
+index 56729b7..c0e122d 100644
+--- a/python/bindings/python_bindings.cc
++++ b/python/bindings/python_bindings.cc
+@@ -33,6 +33,7 @@ void bind_parse_mac(py::module& m);
+ void bind_signal_field(py::module& m);
+ void bind_sync_long(py::module& m);
+ void bind_sync_short(py::module& m);
++void bind_sync_short_fused(py::module& m);
+ void bind_append_crc32(py::module& m);
+ // ) END BINDING_FUNCTION_PROTOTYPES
+ 
+@@ -75,6 +76,7 @@ PYBIND11_MODULE(ieee802_11_python, m)
+     bind_signal_field(m);
+     bind_sync_long(m);
+     bind_sync_short(m);
++    bind_sync_short_fused(m);
+     bind_append_crc32(m);
+     // ) END BINDING_FUNCTION_CALLS
+ }
+diff --git a/python/bindings/sync_short_fused_python.cc b/python/bindings/sync_short_fused_python.cc
+new file mode 100644
+index 0000000..3e3f005
+--- /dev/null
++++ b/python/bindings/sync_short_fused_python.cc
+@@ -0,0 +1,63 @@
++/*
++ * Copyright 2021 Free Software Foundation, Inc.
++ *
++ * This file is part of GNU Radio
++ *
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ *
++ */
++
++/***********************************************************************************/
++/* This file is automatically generated using bindtool and can be manually edited  */
++/* The following lines can be configured to regenerate this file during cmake      */
++/* If manual edits are made, the following tags should be modified accordingly.    */
++/* BINDTOOL_GEN_AUTOMATIC(0)                                                       */
++/* BINDTOOL_USE_PYGCCXML(0)                                                        */
++/* BINDTOOL_HEADER_FILE(sync_short_fused.h)                                        */
++/* BINDTOOL_HEADER_FILE_HASH(905af1bd99ce6aee97285e63de6d0dd8)                     */
++/***********************************************************************************/
++
++#include <pybind11/complex.h>
++#include <pybind11/pybind11.h>
++#include <pybind11/stl.h>
++
++namespace py = pybind11;
++
++#include <ieee802_11/sync_short_fused.h>
++// pydoc.h is automatically generated in the build directory
++#include <sync_short_fused_pydoc.h>
++
++void bind_sync_short_fused(py::module& m)
++{
++
++    using sync_short_fused    = ::gr::ieee802_11::sync_short_fused;
++
++
++    py::class_<sync_short_fused, gr::block, gr::basic_block,
++        std::shared_ptr<sync_short_fused>>(m, "sync_short_fused", D(sync_short_fused))
++
++        .def(py::init(&sync_short_fused::make),
++           py::arg("threshold"),
++           py::arg("min_plateau"),
++           py::arg("log") = false,
++           py::arg("debug") = false,
++           D(sync_short_fused,make)
++        )
++        
++
++
++
++        ;
++
++
++
++
++}
++
++
++
++
++
++
++
++
 -- 
 2.43.0
 

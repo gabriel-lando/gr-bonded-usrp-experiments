@@ -282,10 +282,11 @@ def main():
     p.add_argument('--phase-ctl-port', type=int, default=None,
                    help='UDP port for live phase correction ("B <rad>" = set, '
                         '"B add <rad>" = add); driven by tx_phase_cal.py')
-    p.add_argument('--tx-amplitude', type=float, default=0.4,
+    p.add_argument('--tx-amplitude', type=float, default=0.3,
                    help='Baseband amplitude scale applied before the splitter. '
-                        '0.4 keeps each radio below DAC full scale (0.6 clips '
-                        'OFDM peaks and costs 64-QAM); use --tx-gain for power.')
+                        '0.3 keeps the OFDM peaks of each radio below DAC full '
+                        'scale (0.4 clips the rare ones, 0.6 costs 64-QAM); '
+                        'use --tx-gain for power.')
     p.add_argument('--serial-a', type=str, default='30B56D6',
                    help='B210 serial for Radio A (lower half-band)')
     p.add_argument('--serial-b', type=str, default='30DBC3C',

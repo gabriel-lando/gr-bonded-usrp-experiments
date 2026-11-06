@@ -1449,3 +1449,77 @@ above; what they still had of value is here or in `EXPERIMENTS.md`.
 
 Constellation normalization: BPSK ±1; QPSK ±1/√2; 16-QAM ×√(1/10); 64-QAM ×√(1/42)
 (unit average power). Source: `gr-ieee802-11/lib/constellations_impl.cc`.
+
+## 18. 2026-11-05: bonded TX and RX at 80 MHz (branch gl/80mhz)
+
+Goal: 2 TX + 2 RX at 80 MHz (50 MS/s per radio), both directions. Starting
+point: BPSK 67/79, 64-QAM ~85 %, the Machine 2 RX overflowing every second.
+Five causes, in the order they were found:
+
+1. **Machine 2's module was built without optimization.** Its build had an
+   empty `CMAKE_BUILD_TYPE`, so everything except `overlap_reconstructor.cpp`
+   (which has its own `-O3`) was `-O0`. The receive threads could not keep up:
+   `recv` 44–49 MS/s, tens of overflows per second even with `--no-decode`,
+   while UHD's `benchmark_rate` did 2 × 50 MS/s on the same radios with no
+   loss. gr-bonded-usrp now defaults to Release. Machine 2 also lacks
+   Machine 1's `usrp` group (`rtprio 99`); a process-scoped `prlimit` showed
+   it helps somewhat, but that is a host setting and was left alone.
+2. **Dropped blocks closed the timeline up.** `bonded_source` drops a block
+   with a hole and the reconstructor carried on as if contiguous; its NCOs
+   run on the output count, so each radio's translation phase moved by a
+   different amount. Fixed with `rx_time` tags and
+   `overlap_reconstructor::skip_input()`. (In the 12/64 plans a gap of whole
+   resampler periods closed up only rotates both radios alike, which is why
+   some drops seemed harmless.)
+3. **The FPGA NCO of UHD's default tune.** Raw recordings with forced
+   overflows (`kill -STOP` of the recorder for 40 ms) and
+   `pair_phase`-style cross spectra over the overlap showed the RX pair's
+   phase drifting 2.5 °/s and jumping at every overflow, delay unchanged.
+   UHD tunes the synthesizer and trims its rounding (+0.36 / −0.83 Hz on
+   30DBC3C / 30EDB63 at 2469 / 2499 MHz) with the FPGA CORDIC, which rounds
+   to 0.012 Hz (residual −0.0033 / +0.0037 Hz: 0.007 Hz apart = 2.5 °/s) and
+   restarts its phase when UHD restarts the stream after a single-channel
+   overflow (`b200_impl::handle_overflow` flushes and reissues
+   START_CONTINUOUS). Now the RX tunes with `dsp_freq = 0` and removes the
+   synthesizer's error in the recv threads from each chunk's timestamp:
+   the pair's phase held within 1° for 10 s across forced overflows, and the
+   tracked alignment stays put for whole sessions.
+4. **The PHY front-end.** The fused Schmidl-Cox block (`sync_short_fused`)
+   existed only as uncommitted work in `~/deps/gr-ieee802-11-perf`; it is
+   now the second commit of `bench/gr-ieee802-11-perf.patch`, built on both
+   machines into `~/deps/ieee-perf-install`, and `wifi_bonded_rx.py` picks
+   it automatically. PHY alone: 70 → 194 MS/s at 5 % duty.
+5. **Drive level.** At 80 MHz the frames reach the receiver with 28 dB SNR
+   but −22 dB EVM (a distortion floor of the radios, about the same at
+   40 MHz), right at the 64-QAM 3/4 cliff (all 67 frames of a capture
+   passed SIGNAL, 56 passed the CRC). `--tx-amplitude 0.3` (0.4 still clips
+   the rare OFDM peaks) with TX gain 0.9 gains ~1 dB and takes 64-QAM from
+   92 % to 98 %. At 20 MHz that drive saturates the receivers (17/80;
+   recovers at RX 30 dB), so 0.8 there.
+
+What did *not* matter, measured: the ring-lock hold time (`stall`, the
+longest gap between `recv()` calls, never above ~0.5 ms against UHD's
+~20 ms of buffering); the channel estimator (LS is best: 56 vs 33/0/8 of
+67); the RF of our own transmitter (overflows came with and without it, in
+record mode as well). The remaining 0.1–0.5 overflows per second at
+2 × 50 MS/s cost ~3–4 ms each and no longer disturb the alignment.
+
+Results (30 s ≈ 78 frames unless noted; 64-QAM 3/4, TX amplitude 0.3,
+gain 0.8 at 20 MHz and 0.9 above, RX 35 dB, patched PHY):
+
+| direction | 20 MHz | 40 MHz | 60 MHz | 80 MHz |
+|---|---|---|---|---|
+| M1 TX → M2 RX | 79/79 | 79/79 | 75/78, 76/78, 77/77; one session 58/78 | 77/77, 176/178 (60 s), 373/379 (2 min); 20 frames/s: 466/473, 451/456, 462/471, 457/465, 450/460, one session 321/472 |
+| M2 TX → M1 RX | 78/78 | 79/79 | 79/79, 77/78 | 79/79, 178/178 (60 s), 378/379 (2 min); 20 frames/s: 467/470, 454/455 |
+
+80 MHz BPSK: 78/79, 474/475 at 20 frames/s, 77/77 reversed; 16-QAM 78/79,
+80/80 reversed. Dense traffic at 40 MHz: 460/460.
+
+Open: an occasional session decodes 64-QAM markedly worse (1 of ~7 at
+80 MHz, steady ~75 % for the whole session; offline decode of a good
+session's capture is 98 %), so something sampled at start-up still matters
+now and then. Candidates not yet separated: the radios' random sub-sample
+clock phase (the RX pair's delay was 6 ns in one session, 12 ns in
+another), and ambient 802.11 on channels 11–13 inside the 80 MHz span. Once
+a TX process hung in UHD's device open (killed after 10 min), and a receiver
+then found its radio busy; both radios answered again afterwards.

@@ -62,11 +62,26 @@ bench/replay_probe.sh /tmp/rec40 40e6 /tmp/replay40.log --freq 2.484e9
 
 ## gr-ieee802-11 patch
 
-`gr-ieee802-11-perf.patch` is the performance patch for gr-ieee802-11
-described below (one patch, meant for a fork and an upstream PR). Build
-gr-ieee802-11 with it into a separate prefix and `source use_perf_build.sh`
-(`IEEE_PERF_PREFIX`, default `~/deps/ieee-perf-install`) to use it in one shell
-without touching the system install.
+`gr-ieee802-11-perf.patch` holds the two gr-ieee802-11 performance commits
+described below, as one `git am` series meant for a fork and an upstream PR:
+the phasor frequency correction, and `sync_short_fused`, the fused
+Schmidl-Cox front-end that decoding at 80 MHz needs. It applies to
+gr-ieee802-11 `maint-3.10` (ad0598e). To build it into a separate prefix,
+leaving the system install alone:
+
+```bash
+git clone -b maint-3.10 https://github.com/bastibl/gr-ieee802-11 ~/deps/gr-ieee802-11-perf
+cd ~/deps/gr-ieee802-11-perf
+git am <path-to>/gr-bonded-usrp-experiments/bench/gr-ieee802-11-perf.patch
+mkdir build && cd build
+cmake -DCMAKE_INSTALL_PREFIX=$HOME/deps/ieee-perf-install .. && make -j$(nproc) && make install
+```
+
+Then `source use_perf_build.sh` (`IEEE_PERF_PREFIX`, default
+`~/deps/ieee-perf-install`) loads it in that shell. `wifi_bonded_rx.py` picks
+the fused front-end on its own when the loaded build has it, and the e2e
+scripts source `use_perf_build.sh` on the receiver by default (`RX_PERF=0`
+turns that off). Both lab machines have it installed there.
 
 ## PHY results (2026-10-20, Ryzen 7 5700G, governor `performance`)
 
@@ -94,8 +109,8 @@ in the sample index.
    `pmt::string_to_symbol("wifi_start")` (global-lock intern) on every symbol,
    including the ~360 skipped ones per detection.
 
-Fix (`gr-ieee802-11-perf.patch`, branch `phy-perf` in the worktree
-`~/deps/gr-ieee802-11-perf`): advance a phasor by one complex multiply per
+Fix (first commit of `gr-ieee802-11-perf.patch`, branch `phy-perf` in the
+worktree `~/deps/gr-ieee802-11-perf` on Machine 1): advance a phasor by one complex multiply per
 sample, re-anchored to the exact `exp` every 512 samples; hoist the constant
 `exp(-beta)` and the interned symbol. Decode counts are identical to the
 original down to 6 dB SNR with 100 kHz CFO.
@@ -106,7 +121,7 @@ original down to 6 dB SNR with 100 kHz CFO.
   `--min-buf 262144` and `--max-noutput-items` 0/32768/131072).
 - The Schmidl-Cox front-end alone (~10 generic GNU Radio blocks) tops out at
   **~93 MS/s** with every thread at 40–60% — the cost of chaining many tiny
-  blocks. A single fused C++ front-end block is the next step past that.
+  blocks. That is what `sync_short_fused` (below, second commit) removes.
 - On dense channels `frame_equalizer` is again ~99% (67 MS/s at 70% duty);
   next candidates there are the LS `equalize()` and the per-symbol tag lookup.
 - Not yet measured live: the bonded reconstructor's own two ~99% threads share
@@ -124,5 +139,9 @@ Same frames decoded on every vector (8180 = 8180 at 6 dB SNR, 100 kHz CFO).
 | 30% duty | 76 | 111 |
 | 70% duty | 67 | 86 |
 | CPU per MS/s (30% duty) | 10.6 %·core | 3.9 %·core |
+
+Re-measured 2026-11-05 on 20 dB SNR vectors (system / phasor / phasor +
+fused): 5 % duty 70.2 / 89.7 / 193.8 MS/s, 30 % duty 30.5 / 76.4 / 108.0 MS/s,
+identical frame counts.
 
 Live results of reconstruction and PHY together are in `../docs/LAB_NOTES.md`.
